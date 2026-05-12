@@ -1,0 +1,57 @@
+services:
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agentgate
+      POSTGRES_PASSWORD: agentgate
+      POSTGRES_DB: agentgate
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentgate"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql://agentgate:agentgate@db:5432/agentgate
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://agentgate:agentgate@db:5432/agentgate
+      APP_ENV: development
+      DB_ECHO: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  test:
+    build: .
+    command: pytest -v --tb=short
+    environment:
+      # 테스트는 SQLite 인메모리 사용 (PostgreSQL 불필요)
+      APP_ENV: test
+    depends_on:
+      - db
+    profiles:
+      - test
+
+volumes:
+  postgres_data:
