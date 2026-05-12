@@ -53,7 +53,7 @@ def test_invoke_deny_disabled_tool(client):
 def test_invoke_unknown_tool(client):
     seed_agent(client)
     seed_user(client)
-    assert _invoke(client, tool_name="nonexistent_tool").status_code == 422
+    assert _invoke(client, tool_name="nonexistent_tool").status_code == 404
 
 
 def test_full_approval_flow(client):
@@ -105,9 +105,9 @@ def test_execute_after_rejection_is_blocked(client):
 def test_audit_log_created(client):
     _setup(client, risk_level="LOW")
     _invoke(client)
-    logs = client.get("/api/v1/audit-logs").json()
-    assert len(logs) == 1
-    assert logs[0]["tool_name"] == "refund_order"
+    page = client.get("/api/v1/audit-logs").json()
+    assert page["total"] == 1
+    assert page["items"][0]["tool_name"] == "refund_order"
 
 
 def test_audit_log_detail_by_request_id(client):

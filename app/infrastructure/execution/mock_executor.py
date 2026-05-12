@@ -1,3 +1,4 @@
+import time
 from typing import Any, Callable, Dict
 
 from app.domain.enums import ExecutionStatus
@@ -62,11 +63,22 @@ class MockExecutor(IToolExecutor):
     """Adapter — implements IToolExecutor with canned responses."""
 
     def execute(self, tool_name: str, input_data: Dict[str, Any]) -> ExecutionResult:
+        start = time.monotonic()
         handler = _REGISTRY.get(tool_name)
         if handler is None:
+            duration_ms = int((time.monotonic() - start) * 1000)
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
                 output={"error": f"No mock handler registered for tool: {tool_name}"},
                 cost=0.0,
+                duration_ms=duration_ms,
             )
-        return handler(input_data)
+        result = handler(input_data)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        # Recreate with actual timing since ExecutionResult is frozen
+        return ExecutionResult(
+            status=result.status,
+            output=result.output,
+            cost=result.cost,
+            duration_ms=duration_ms,
+        )

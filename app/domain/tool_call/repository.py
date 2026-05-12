@@ -27,3 +27,6 @@ class IToolCallRepository(ABC):
 
     @abstractmethod
     def get_daily_cost(self, tool_name: str) -> float: ...
+
+    @abstractmethod
+    def count_all(self) -> int: ...

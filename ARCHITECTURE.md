@@ -4,7 +4,8 @@
 
 AgentGate is a backend gateway that intercepts every AI Agent tool call and enforces
 **policy, cost, approval, and audit** before the tool is executed.
-The codebase follows **Domain-Driven Design (DDD)** with a strict layered architecture.
+The codebase follows **Domain-Driven Design (DDD)** with a strict layered architecture
+and the **Ports & Adapters (Hexagonal)** pattern.
 
 ---
 
@@ -25,7 +26,8 @@ The codebase follows **Domain-Driven Design (DDD)** with a strict layered archit
 │  domain/             Core business logic (no I/O)         │
 │  - Aggregates, Entities, Value Objects                    │
 │  - Repository / Executor interfaces (ports)               │
-│  - PolicyEngine domain service                            │
+│  - PolicyEngine domain service (rule chain)               │
+│  - Domain events (lightweight dataclasses)                │
 └──────────────────────────────────────────────────────────┘
                ▲ implements interfaces
 ┌──────────────┴───────────────────────────────────────────┐
@@ -57,16 +59,31 @@ Infrastructure imports domain; domain never imports infrastructure.
 | Name | Description |
 |------|-------------|
 | `InputData` | Immutable payload wrapper; computes SHA-256 hash for audit |
-| `ExecutionResult` | Immutable executor output (status, output dict, cost) |
+| `ExecutionResult` | Immutable executor output (status, output dict, cost, duration_ms) |
 
 ### Domain Service
 
 `PolicyEngine.evaluate(PolicyContext) → PolicyResult`
 
-Pure function; no side effects. Returns one of:
+Pure function; no side effects. Iterates an ordered rule chain.
+Returns one of:
 - `ALLOW` — execute immediately
 - `REQUIRE_APPROVAL` — gate on human decision
 - `DENY` — block unconditionally
+
+### Domain Events
+
+Lightweight frozen dataclasses emitted by the `ToolCall` aggregate.
+Collected via `tool_call.collect_events()` — the call clears the queue.
+
+| Event | Emitted when |
+|-------|-------------|
+| `ToolCallCreatedEvent` | `ToolCall.create()` |
+| `ToolCallDeniedEvent` | `deny()` |
+| `ApprovalRequestedEvent` | `request_approval()` |
+| `ToolCallApprovedEvent` | `approve()` |
+| `ToolCallRejectedEvent` | `reject()` |
+| `ToolCallExecutedEvent` | `record_execution()` |
 
 ---
 
@@ -83,7 +100,7 @@ Pure function; no side effects. Returns one of:
       SKIPPED    request_    record_execution()
                  approval()       │
                      │         SIMULATED / SUCCESS / FAILED
-               PENDING
+               PENDING          (approval untouched)
               ┌──────┴──────┐
               │             │
            approve()     reject()
@@ -93,6 +110,7 @@ Pure function; no side effects. Returns one of:
          record_execution()
               │
          SIMULATED / SUCCESS / FAILED
+         (approval → EXECUTED / FAILED)
 ```
 
 State transitions live **inside the aggregate** (`tool_call.py`).
@@ -100,18 +118,30 @@ No service or repository is allowed to mutate state directly.
 
 ---
 
-## Policy Engine Decision Tree
+## Policy Engine — Chain of Responsibility
 
 ```
-Tool disabled?           → DENY
-User disabled?           → DENY
-Agent disabled?          → DENY
-User missing required_role? → DENY
-Agent domain not allowed?   → DENY
-Daily cost limit reached?   → DENY
-risk_level=HIGH or approval_required=true? → REQUIRE_APPROVAL
-Otherwise                → ALLOW
+domain/policy/
+├── context.py     PolicyContext (input DTO), PolicyResult (output DTO)
+├── rules.py       PolicyRule (ABC) + 7 concrete rules + DEFAULT_RULES list
+└── policy_engine.py  PolicyEngine — iterates rule chain, returns first match
 ```
+
+```
+Decision tree (DEFAULT_RULES order):
+
+Tool disabled?              → DENY  (ToolEnabledRule)
+User account disabled?      → DENY  (UserEnabledRule)
+Agent disabled?             → DENY  (AgentEnabledRule)
+User missing required_role? → DENY  (RoleCheckRule)
+Agent domain not allowed?   → DENY  (DomainAccessRule)
+Daily cost limit reached?   → DENY  (CostLimitRule)
+risk=HIGH or approval flag? → REQUIRE_APPROVAL  (ApprovalRequiredRule)
+Otherwise                   → ALLOW
+```
+
+To add a new policy check: create a `PolicyRule` subclass, add it to `DEFAULT_RULES`.
+To override in tests: `PolicyEngine(rules=[MyRule()])`.
 
 ---
 
@@ -144,13 +174,32 @@ transaction.
 ### Why `IToolCallRepository.save()` upserts both tables
 
 The aggregate is the unit of consistency. A single `save()` persists the full
-aggregate state atomically (tool_calls row + approvals row). Callers never touch
+aggregate state atomically (`tool_calls` row + `approvals` row). Callers never touch
 ORM objects directly.
+
+### Why `Approval.status` advances to `EXECUTED`/`FAILED`
+
+After `record_execution()`, the outcome is unambiguous: the approval that gated this
+call is either `EXECUTED` (tool ran successfully) or `FAILED`. This eliminates the
+ambiguous `APPROVED` terminal state and makes audit queries simpler.
 
 ### N+1 prevention
 
 `ToolCallORM.approval` is configured with `lazy="selectin"`, so SQLAlchemy
 issues one IN-query for approvals rather than one query per row.
+
+### Audit enrichment fields
+
+| Field | Source |
+|-------|--------|
+| `trace_id` | Body `trace_id` field, then `X-Trace-Id` header, then auto-generated UUID |
+| `policy_reason` | `PolicyResult.reason` from the first matching rule |
+| `duration_ms` | `MockExecutor` wall-clock time; stored in `ExecutionResult.duration_ms` |
+
+### Global exception handlers
+
+All domain exceptions map to HTTP status in `main.py` — routers contain no
+`try/except` blocks. Consistent `{"code": "...", "message": "..."}` error schema.
 
 ---
 
@@ -162,8 +211,9 @@ issues one IN-query for approvals rather than one query per row.
 | LangGraph / OpenAI agent | Add a `/mcp` or `/agent` router in `api/v1/` |
 | JWT authentication | FastAPI middleware + `Depends` in `api/deps.py` |
 | Async support | Swap `Session` for `AsyncSession` in `infrastructure/persistence/` |
-| Event bus (domain events) | Add `domain/events.py`, publish from aggregate methods |
+| Event bus | Consume `tool_call.collect_events()` in use case, publish to broker |
 | Rate limiting | Middleware in `app/main.py` |
+| Geo-fencing / IP check | New `PolicyRule` subclass, append to `DEFAULT_RULES` |
 
 ---
 
@@ -174,8 +224,8 @@ app/
 ├── domain/
 │   ├── enums.py                  RiskLevel, PolicyDecision, ApprovalStatus, ExecutionStatus
 │   ├── shared/
-│   │   ├── exceptions.py         DomainError, NotFoundError, PolicyViolationError
-│   │   └── value_objects.py      InputData, ExecutionResult
+│   │   ├── exceptions.py         AgentGateError hierarchy with code attributes
+│   │   └── value_objects.py      InputData, ExecutionResult (with duration_ms)
 │   ├── tool/
 │   │   ├── tool.py               Tool aggregate
 │   │   └── repository.py         IToolRepository (ABC)
@@ -187,23 +237,42 @@ app/
 │   │   └── repository.py         IUserRepository (ABC)
 │   ├── tool_call/
 │   │   ├── tool_call.py          ToolCall aggregate root + Approval entity
-│   │   ├── repository.py         IToolCallRepository (ABC)
+│   │   ├── events.py             Domain events (ToolCallCreated, Approved, …)
+│   │   ├── repository.py         IToolCallRepository (ABC) + count_all
 │   │   └── executor.py           IToolExecutor (ABC)
 │   └── policy/
-│       └── policy_engine.py      PolicyEngine domain service
+│       ├── context.py            PolicyContext, PolicyResult
+│       ├── rules.py              PolicyRule (ABC) + 7 concrete rules + DEFAULT_RULES
+│       └── policy_engine.py      PolicyEngine — iterates rule chain
 ├── application/
 │   ├── tool/use_cases.py         Register/Get/List/Update/Delete tool
-│   ├── gateway/use_cases.py      InvokeTool, ExecuteApproved
+│   ├── gateway/use_cases.py      InvokeToolUseCase (trace_id, timing), ExecuteApproved
 │   └── approval/use_cases.py     List/Get/Approve/Reject
 ├── infrastructure/
 │   ├── persistence/
 │   │   ├── database.py           SQLAlchemy engine + session factory
-│   │   ├── orm_models.py         ORM table definitions
+│   │   ├── orm_models.py         ORM table definitions (trace_id, policy_reason, duration_ms)
 │   │   └── repositories/         Concrete repository implementations
 │   └── execution/
-│       └── mock_executor.py      MockExecutor (implements IToolExecutor)
+│       └── mock_executor.py      MockExecutor with wall-clock timing
 └── api/
     ├── deps.py                   FastAPI dependency wiring
-    ├── schemas.py                Pydantic request/response models
-    └── v1/                       Route handlers (HTTP translation only)
+    ├── schemas.py                Pydantic models (ErrorCode, ErrorResponse, AuditLogPage)
+    └── v1/                       Route handlers (HTTP translation, no try/except)
+
+alembic/versions/
+├── 0001_initial_schema.py
+├── 0002_add_performance_indices.py
+└── 0003_audit_enrichment.py     trace_id, policy_reason, duration_ms columns
+
+tests/
+├── test_tool_call_aggregate.py  (18 tests)
+├── test_value_objects.py        (12 tests)
+├── test_policy.py               (9 tests)
+├── test_policy_rules.py         (22 tests — rule isolation + custom chains)
+├── test_domain_events.py        (8 tests — event emission)
+├── test_audit_enrichment.py     (21 tests — trace_id, policy_reason, pagination, errors)
+├── test_gateway.py              (10 tests)
+├── test_approvals.py            (6 tests)
+└── test_tools.py                (7 tests)
 ```

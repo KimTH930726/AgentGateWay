@@ -1,6 +1,6 @@
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import (
     get_approve_tool_call, get_get_approval,
@@ -11,7 +11,6 @@ from app.application.approval.use_cases import (
     ApproveCommand, ApproveToolCallUseCase, GetApprovalUseCase,
     ListApprovalsUseCase, RejectCommand, RejectToolCallUseCase,
 )
-from app.domain.shared.exceptions import DomainError, NotFoundError
 from app.domain.tool_call.tool_call import ToolCall
 
 router = APIRouter(prefix="/approvals", tags=["Approvals"])
@@ -46,10 +45,7 @@ def list_approvals(
 
 @router.get("/{approval_id}", response_model=ApprovalResponse)
 def get_approval(approval_id: str, uc: GetApprovalUseCase = Depends(get_get_approval)):
-    try:
-        return _to_response(uc.execute(approval_id))
-    except NotFoundError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return _to_response(uc.execute(approval_id))
 
 
 @router.post("/{approval_id}/approve", response_model=ApprovalResponse)
@@ -58,16 +54,11 @@ def approve(
     body: ApprovalActionRequest,
     uc: ApproveToolCallUseCase = Depends(get_approve_tool_call),
 ):
-    try:
-        return _to_response(uc.execute(ApproveCommand(
-            approval_id=approval_id,
-            approver_id=body.approver_id,
-            reason=body.reason,
-        )))
-    except NotFoundError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    except DomainError as e:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    return _to_response(uc.execute(ApproveCommand(
+        approval_id=approval_id,
+        approver_id=body.approver_id,
+        reason=body.reason,
+    )))
 
 
 @router.post("/{approval_id}/reject", response_model=ApprovalResponse)
@@ -76,13 +67,8 @@ def reject(
     body: ApprovalActionRequest,
     uc: RejectToolCallUseCase = Depends(get_reject_tool_call),
 ):
-    try:
-        return _to_response(uc.execute(RejectCommand(
-            approval_id=approval_id,
-            approver_id=body.approver_id,
-            reason=body.reason,
-        )))
-    except NotFoundError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    except DomainError as e:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    return _to_response(uc.execute(RejectCommand(
+        approval_id=approval_id,
+        approver_id=body.approver_id,
+        reason=body.reason,
+    )))

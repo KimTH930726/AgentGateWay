@@ -1,8 +1,11 @@
-from dataclasses import dataclass
+import time
+import uuid
+from dataclasses import dataclass, field
 from typing import Any, Dict
 
 from app.domain.enums import PolicyDecision
-from app.domain.policy.policy_engine import PolicyContext, PolicyEngine
+from app.domain.policy.policy_engine import PolicyEngine
+from app.domain.policy.context import PolicyContext
 from app.domain.shared.exceptions import NotFoundError
 from app.domain.shared.value_objects import InputData
 from app.domain.tool.repository import IToolRepository
@@ -19,6 +22,7 @@ class InvokeToolCommand:
     user_id: str
     tool_name: str
     input_data: Dict[str, Any]
+    trace_id: str = field(default="")
 
 
 class InvokeToolUseCase:
@@ -56,6 +60,8 @@ class InvokeToolUseCase:
             PolicyContext(tool=tool, agent=agent, user=user, daily_usage_cost=daily_cost)
         )
 
+        trace_id = cmd.trace_id or str(uuid.uuid4())
+
         tool_call = ToolCall.create(
             agent_id=cmd.agent_id,
             user_id=cmd.user_id,
@@ -63,6 +69,8 @@ class InvokeToolUseCase:
             input_data=InputData(payload=cmd.input_data),
             risk_level=tool.risk_level,
             policy_decision=policy_result.decision,
+            trace_id=trace_id,
+            policy_reason=policy_result.reason,
         )
 
         if policy_result.decision == PolicyDecision.DENY:
@@ -70,7 +78,9 @@ class InvokeToolUseCase:
         elif policy_result.decision == PolicyDecision.REQUIRE_APPROVAL:
             tool_call.request_approval()
         else:
+            start = time.monotonic()
             result = self._executor.execute(cmd.tool_name, cmd.input_data)
+            # duration_ms from executor already includes actual timing
             tool_call.record_execution(result)
 
         self._tool_call_repo.save(tool_call)

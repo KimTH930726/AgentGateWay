@@ -6,11 +6,20 @@ Owns the complete lifecycle of a single tool invocation:
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from app.domain.enums import ApprovalStatus, ExecutionStatus, PolicyDecision, RiskLevel
 from app.domain.shared.exceptions import DomainError
 from app.domain.shared.value_objects import ExecutionResult, InputData
+from app.domain.tool_call.events import (
+    ApprovalRequestedEvent,
+    DomainEvent,
+    ToolCallApprovedEvent,
+    ToolCallCreatedEvent,
+    ToolCallDeniedEvent,
+    ToolCallExecutedEvent,
+    ToolCallRejectedEvent,
+)
 
 
 def _now() -> datetime:
@@ -48,6 +57,9 @@ class ToolCall:
         policy_decision: PolicyDecision,
         estimated_cost: float,
         created_at: datetime,
+        trace_id: str = "",
+        policy_reason: str = "",
+        duration_ms: Optional[int] = None,
         approval: Optional[Approval] = None,
         execution_status: Optional[ExecutionStatus] = None,
         actual_cost: Optional[float] = None,
@@ -63,11 +75,15 @@ class ToolCall:
         self._policy_decision = policy_decision
         self._estimated_cost = estimated_cost
         self._created_at = created_at
+        self._trace_id = trace_id
+        self._policy_reason = policy_reason
+        self._duration_ms = duration_ms
         self._approval = approval
         self._execution_status = execution_status
         self._actual_cost = actual_cost
         self._error_message = error_message
         self._executed_at = executed_at
+        self._events: List[DomainEvent] = []
 
     # --- Factory -----------------------------------------------------------
 
@@ -81,8 +97,11 @@ class ToolCall:
         risk_level: RiskLevel,
         policy_decision: PolicyDecision,
         estimated_cost: float = 0.01,
+        trace_id: str = "",
+        policy_reason: str = "",
     ) -> "ToolCall":
-        return cls(
+        now = _now()
+        tc = cls(
             request_id=str(uuid.uuid4()),
             agent_id=agent_id,
             user_id=user_id,
@@ -91,20 +110,35 @@ class ToolCall:
             risk_level=risk_level,
             policy_decision=policy_decision,
             estimated_cost=estimated_cost,
-            created_at=_now(),
+            created_at=now,
+            trace_id=trace_id,
+            policy_reason=policy_reason,
         )
+        tc._events.append(
+            ToolCallCreatedEvent(
+                request_id=tc._request_id,
+                occurred_at=now,
+                tool_name=tool_name,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+        )
+        return tc
 
     # --- State-machine commands --------------------------------------------
 
     def deny(self, reason: str) -> None:
-        """Called immediately when policy decision is DENY."""
         if self._policy_decision != PolicyDecision.DENY:
             raise DomainError("Cannot deny: policy decision is not DENY")
         self._execution_status = ExecutionStatus.SKIPPED
         self._error_message = reason
+        self._events.append(
+            ToolCallDeniedEvent(
+                request_id=self._request_id, occurred_at=_now(), reason=reason
+            )
+        )
 
     def request_approval(self) -> None:
-        """Opens an approval gate; creates the embedded Approval entity."""
         if self._policy_decision != PolicyDecision.REQUIRE_APPROVAL:
             raise DomainError("Cannot request approval: policy decision is not REQUIRE_APPROVAL")
         if self._approval is not None:
@@ -113,30 +147,66 @@ class ToolCall:
             approval_id=str(uuid.uuid4()),
             status=ApprovalStatus.PENDING,
         )
+        self._events.append(
+            ApprovalRequestedEvent(
+                request_id=self._request_id,
+                occurred_at=_now(),
+                approval_id=self._approval.approval_id,
+            )
+        )
 
     def approve(self, approver_id: str, reason: Optional[str] = None) -> None:
-        """Admin approves the pending request."""
         self._assert_approval_is(ApprovalStatus.PENDING)
         self._approval.status = ApprovalStatus.APPROVED
         self._approval.approver_id = approver_id
         self._approval.reason = reason
         self._approval.decided_at = _now()
+        self._events.append(
+            ToolCallApprovedEvent(
+                request_id=self._request_id,
+                occurred_at=self._approval.decided_at,
+                approver_id=approver_id,
+            )
+        )
 
     def reject(self, approver_id: str, reason: Optional[str] = None) -> None:
-        """Admin rejects the pending request."""
         self._assert_approval_is(ApprovalStatus.PENDING)
         self._approval.status = ApprovalStatus.REJECTED
         self._approval.approver_id = approver_id
         self._approval.reason = reason
         self._approval.decided_at = _now()
+        self._events.append(
+            ToolCallRejectedEvent(
+                request_id=self._request_id,
+                occurred_at=self._approval.decided_at,
+                approver_id=approver_id,
+            )
+        )
 
     def record_execution(self, result: ExecutionResult) -> None:
-        """Records the executor outcome; enforces approval pre-condition."""
         if self._policy_decision == PolicyDecision.REQUIRE_APPROVAL:
             self._assert_approval_is(ApprovalStatus.APPROVED)
         self._execution_status = result.status
         self._actual_cost = result.cost
+        self._duration_ms = result.duration_ms
         self._executed_at = _now()
+
+        if self._approval is not None:
+            self._approval.status = (
+                ApprovalStatus.EXECUTED
+                if result.status == ExecutionStatus.SIMULATED or result.status == ExecutionStatus.SUCCESS
+                else ApprovalStatus.FAILED
+            )
+
+        self._events.append(
+            ToolCallExecutedEvent(
+                request_id=self._request_id,
+                occurred_at=self._executed_at,
+                execution_status=result.status.value,
+                actual_cost=result.cost,
+                duration_ms=result.duration_ms,
+            )
+        )
 
     # --- Guards ------------------------------------------------------------
 
@@ -147,6 +217,13 @@ class ToolCall:
             raise DomainError(
                 f"Expected approval status {expected}, got {self._approval.status}"
             )
+
+    # --- Domain events (collect and clear) ---------------------------------
+
+    def collect_events(self) -> List[DomainEvent]:
+        """Return and clear all pending domain events."""
+        events, self._events = self._events, []
+        return events
 
     # --- Properties (read-only projection) ---------------------------------
 
@@ -205,3 +282,15 @@ class ToolCall:
     @property
     def executed_at(self) -> Optional[datetime]:
         return self._executed_at
+
+    @property
+    def trace_id(self) -> str:
+        return self._trace_id
+
+    @property
+    def policy_reason(self) -> str:
+        return self._policy_reason
+
+    @property
+    def duration_ms(self) -> Optional[int]:
+        return self._duration_ms

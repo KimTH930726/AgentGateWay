@@ -2,7 +2,8 @@ import pytest
 
 from app.domain.agent.agent import Agent
 from app.domain.enums import PolicyDecision, RiskLevel
-from app.domain.policy.policy_engine import PolicyContext, PolicyEngine
+from app.domain.policy.context import PolicyContext
+from app.domain.policy.policy_engine import PolicyEngine
 from app.domain.tool.tool import Tool
 from app.domain.user.user import User
 

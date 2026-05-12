@@ -35,3 +35,4 @@ class ExecutionResult:
     status: ExecutionStatus
     output: Dict[str, Any]
     cost: float
+    duration_ms: int = 0

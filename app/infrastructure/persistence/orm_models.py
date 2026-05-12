@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean, Column, DateTime, Enum as SAEnum, Float,
-    ForeignKey, Index, JSON, String, Text,
+    ForeignKey, Index, Integer, JSON, String, Text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -71,6 +71,9 @@ class ToolCallORM(Base):
     estimated_cost = Column(Float, nullable=False, default=0.0)
     actual_cost = Column(Float, nullable=True)
     error_message = Column(Text, nullable=True)
+    trace_id = Column(String(64), nullable=False, default="", index=True)
+    policy_reason = Column(Text, nullable=False, default="")
+    duration_ms = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
     executed_at = Column(DateTime(timezone=True), nullable=True)
 

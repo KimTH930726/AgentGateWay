@@ -42,6 +42,9 @@ class ToolCallRepository(IToolCallRepository):
             policy_decision=PolicyDecision(row.policy_decision),
             estimated_cost=row.estimated_cost,
             created_at=row.created_at,
+            trace_id=row.trace_id or "",
+            policy_reason=row.policy_reason or "",
+            duration_ms=row.duration_ms,
             approval=approval,
             execution_status=ExecutionStatus(row.execution_status) if row.execution_status else None,
             actual_cost=row.actual_cost,
@@ -74,6 +77,9 @@ class ToolCallRepository(IToolCallRepository):
                 estimated_cost=tool_call.estimated_cost,
                 actual_cost=tool_call.actual_cost,
                 error_message=tool_call.error_message,
+                trace_id=tool_call.trace_id,
+                policy_reason=tool_call.policy_reason,
+                duration_ms=tool_call.duration_ms,
                 created_at=tool_call.created_at,
                 executed_at=tool_call.executed_at,
             )
@@ -84,6 +90,7 @@ class ToolCallRepository(IToolCallRepository):
             tc_row.execution_status = tool_call.execution_status
             tc_row.actual_cost = tool_call.actual_cost
             tc_row.error_message = tool_call.error_message
+            tc_row.duration_ms = tool_call.duration_ms
             tc_row.executed_at = tool_call.executed_at
 
         if tool_call.approval:
@@ -156,3 +163,6 @@ class ToolCallRepository(IToolCallRepository):
             .scalar()
         )
         return float(result)
+
+    def count_all(self) -> int:
+        return self._db.query(func.count(ToolCallORM.id)).scalar() or 0

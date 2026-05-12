@@ -1,9 +1,25 @@
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
 from app.domain.enums import ApprovalStatus, ExecutionStatus, PolicyDecision, RiskLevel
+
+
+# --- Error ----------------------------------------------------------------
+
+class ErrorCode(str, Enum):
+    NOT_FOUND = "NOT_FOUND"
+    DOMAIN_ERROR = "DOMAIN_ERROR"
+    CONFLICT = "CONFLICT"
+    POLICY_VIOLATION = "POLICY_VIOLATION"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class ErrorResponse(BaseModel):
+    code: ErrorCode
+    message: str
 
 
 # --- Tool -----------------------------------------------------------------
@@ -84,17 +100,21 @@ class InvokeRequest(BaseModel):
     user_id: str
     tool_name: str
     input: Dict[str, Any]
+    trace_id: Optional[str] = None
 
 
 class InvokeResponse(BaseModel):
     request_id: str
     tool_name: str
     policy_decision: PolicyDecision
+    policy_reason: str = ""
+    trace_id: str = ""
     approval_status: Optional[ApprovalStatus] = None
     execution_status: Optional[ExecutionStatus] = None
     risk_level: RiskLevel
     estimated_cost: float
     actual_cost: Optional[float] = None
+    duration_ms: Optional[int] = None
     error_message: Optional[str] = None
     created_at: datetime
     executed_at: Optional[datetime] = None
@@ -126,15 +146,26 @@ class ApprovalResponse(BaseModel):
 
 class AuditLogResponse(BaseModel):
     request_id: str
+    trace_id: str = ""
     agent_id: str
     user_id: str
     tool_name: str
     input_hash: str
     risk_level: RiskLevel
     policy_decision: PolicyDecision
+    policy_reason: str = ""
     approval_status: Optional[ApprovalStatus] = None
     execution_status: Optional[ExecutionStatus] = None
     estimated_cost: float
     actual_cost: Optional[float] = None
+    duration_ms: Optional[int] = None
     created_at: datetime
     executed_at: Optional[datetime] = None
+
+
+class AuditLogPage(BaseModel):
+    items: List[AuditLogResponse]
+    total: int
+    limit: int
+    offset: int
+    has_next: bool
