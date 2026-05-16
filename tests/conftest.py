@@ -62,11 +62,46 @@ def seed_tool(
     return resp.json()
 
 
-def seed_agent(client, *, agent_id="cs-agent-001", domains=None):
-    resp = client.post("/api/v1/agents", json={
+def seed_agent(
+    client,
+    *,
+    agent_id="cs-agent-001",
+    domains=None,
+    daily_cost_limit=None,
+    daily_cost_warn_threshold=None,
+    daily_token_limit=None,
+):
+    payload = {
         "agent_id": agent_id,
         "name": "CS Agent",
         "allowed_domains": domains or ["order"],
+    }
+    if daily_cost_limit is not None:
+        payload["daily_cost_limit"] = daily_cost_limit
+    if daily_cost_warn_threshold is not None:
+        payload["daily_cost_warn_threshold"] = daily_cost_warn_threshold
+    if daily_token_limit is not None:
+        payload["daily_token_limit"] = daily_token_limit
+    resp = client.post("/api/v1/agents", json=payload)
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def seed_agent_tool_policy(
+    client,
+    *,
+    agent_id="cs-agent-001",
+    tool_name="refund_order",
+    policy_type="DENY",
+    reason="",
+    created_by="admin-001",
+):
+    resp = client.post("/api/v1/agent-tool-policies", json={
+        "agent_id": agent_id,
+        "tool_name": tool_name,
+        "policy_type": policy_type,
+        "reason": reason,
+        "created_by": created_by,
     })
     assert resp.status_code == 201, resp.text
     return resp.json()

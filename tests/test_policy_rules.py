@@ -179,4 +179,7 @@ class TestPolicyEngineCustomRules:
         assert result.decision == PolicyDecision.DENY
 
     def test_default_rules_order(self):
-        assert len(DEFAULT_RULES) == 7
+        # Governance expansion grew the default chain: per-agent allow/deny,
+        # soft cost warning, agent-level budget hard/warn, and token cap rules
+        # joined the original seven.
+        assert len(DEFAULT_RULES) == 12

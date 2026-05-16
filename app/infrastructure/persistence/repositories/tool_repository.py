@@ -25,6 +25,7 @@ class ToolRepository(IToolRepository):
             sandbox_supported=row.sandbox_supported,
             daily_cost_limit=row.daily_cost_limit,
             enabled=row.enabled,
+            warn_cost_threshold=row.warn_cost_threshold,
         )
 
     def find_by_tool_id(self, tool_id: str) -> Optional[Tool]:
@@ -49,6 +50,7 @@ class ToolRepository(IToolRepository):
             approval_required=tool.approval_required,
             sandbox_supported=tool.sandbox_supported,
             daily_cost_limit=tool.daily_cost_limit,
+            warn_cost_threshold=tool.warn_cost_threshold,
             enabled=tool.enabled,
         )
         self._db.add(row)

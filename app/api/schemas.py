@@ -4,7 +4,16 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-from app.domain.enums import ApprovalStatus, ExecutionStatus, PolicyDecision, RiskLevel
+from app.domain.enums import (
+    AgentToolPolicyType,
+    ApprovalStatus,
+    ChangeType,
+    ExecutionStatus,
+    GovernanceEntityType,
+    PolicyDecision,
+    RiskLevel,
+    RuleOutcome,
+)
 
 
 # --- Error ----------------------------------------------------------------
@@ -34,6 +43,7 @@ class ToolCreate(BaseModel):
     approval_required: bool = False
     sandbox_supported: bool = False
     daily_cost_limit: float = 1000.0
+    warn_cost_threshold: Optional[float] = None
 
 
 class ToolUpdate(BaseModel):
@@ -43,6 +53,7 @@ class ToolUpdate(BaseModel):
     approval_required: Optional[bool] = None
     sandbox_supported: Optional[bool] = None
     daily_cost_limit: Optional[float] = None
+    warn_cost_threshold: Optional[float] = None
     enabled: Optional[bool] = None
 
 
@@ -56,6 +67,7 @@ class ToolResponse(BaseModel):
     approval_required: bool
     sandbox_supported: bool
     daily_cost_limit: float
+    warn_cost_threshold: Optional[float] = None
     enabled: bool
 
     model_config = {"from_attributes": True}
@@ -67,6 +79,20 @@ class AgentCreate(BaseModel):
     agent_id: str
     name: str
     allowed_domains: List[str]
+    daily_cost_limit: Optional[float] = None
+    monthly_cost_limit: Optional[float] = None
+    daily_token_limit: Optional[int] = None
+    daily_cost_warn_threshold: Optional[float] = None
+
+
+class AgentUpdate(BaseModel):
+    name: Optional[str] = None
+    allowed_domains: Optional[List[str]] = None
+    enabled: Optional[bool] = None
+    daily_cost_limit: Optional[float] = None
+    monthly_cost_limit: Optional[float] = None
+    daily_token_limit: Optional[int] = None
+    daily_cost_warn_threshold: Optional[float] = None
 
 
 class AgentResponse(BaseModel):
@@ -74,8 +100,22 @@ class AgentResponse(BaseModel):
     name: str
     allowed_domains: List[str]
     enabled: bool
+    daily_cost_limit: Optional[float] = None
+    monthly_cost_limit: Optional[float] = None
+    daily_token_limit: Optional[int] = None
+    daily_cost_warn_threshold: Optional[float] = None
 
     model_config = {"from_attributes": True}
+
+
+class AgentUsageResponse(BaseModel):
+    agent_id: str
+    daily_cost: float
+    monthly_cost: float
+    daily_tokens: int
+    daily_cost_limit: Optional[float] = None
+    daily_cost_warn_threshold: Optional[float] = None
+    daily_token_limit: Optional[int] = None
 
 
 # --- User -----------------------------------------------------------------
@@ -95,12 +135,25 @@ class UserResponse(BaseModel):
 
 # --- Gateway --------------------------------------------------------------
 
+class CandidateToolPayload(BaseModel):
+    tool_name: str
+    reason_not_selected: str = ""
+
+
 class InvokeRequest(BaseModel):
     agent_id: str
     user_id: str
     tool_name: str
     input: Dict[str, Any]
     trace_id: Optional[str] = None
+    selected_reason: Optional[str] = None
+    candidates: Optional[List[CandidateToolPayload]] = None
+
+
+class RuleEvaluationResponse(BaseModel):
+    rule: str
+    outcome: RuleOutcome
+    reason: str = ""
 
 
 class InvokeResponse(BaseModel):
@@ -114,10 +167,14 @@ class InvokeResponse(BaseModel):
     risk_level: RiskLevel
     estimated_cost: float
     actual_cost: Optional[float] = None
+    tokens_used: Optional[int] = None
     duration_ms: Optional[int] = None
     error_message: Optional[str] = None
     created_at: datetime
     executed_at: Optional[datetime] = None
+    selected_reason: Optional[str] = None
+    candidates: Optional[List[CandidateToolPayload]] = None
+    rule_trace: List[RuleEvaluationResponse] = []
 
 
 # --- Approval -------------------------------------------------------------
@@ -158,13 +215,72 @@ class AuditLogResponse(BaseModel):
     execution_status: Optional[ExecutionStatus] = None
     estimated_cost: float
     actual_cost: Optional[float] = None
+    tokens_used: Optional[int] = None
     duration_ms: Optional[int] = None
     created_at: datetime
     executed_at: Optional[datetime] = None
+    selected_reason: Optional[str] = None
+    candidates: Optional[List[CandidateToolPayload]] = None
+    rule_trace: List[RuleEvaluationResponse] = []
 
 
 class AuditLogPage(BaseModel):
     items: List[AuditLogResponse]
+    total: int
+    limit: int
+    offset: int
+    has_next: bool
+
+
+# --- Agent Tool Policy ----------------------------------------------------
+
+class AgentToolPolicyCreate(BaseModel):
+    agent_id: str
+    tool_name: str
+    policy_type: AgentToolPolicyType
+    reason: str = ""
+    created_by: str = ""
+
+
+class AgentToolPolicyUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    reason: Optional[str] = None
+    changed_by: Optional[str] = None
+    change_reason: Optional[str] = None
+
+
+class AgentToolPolicyDeleteRequest(BaseModel):
+    changed_by: Optional[str] = None
+    change_reason: Optional[str] = None
+
+
+class AgentToolPolicyResponse(BaseModel):
+    policy_id: str
+    agent_id: str
+    tool_name: str
+    policy_type: AgentToolPolicyType
+    enabled: bool
+    reason: str = ""
+    created_by: str = ""
+    created_at: datetime
+
+
+# --- Governance / Change Log ---------------------------------------------
+
+class ChangeLogResponse(BaseModel):
+    log_id: str
+    entity_type: GovernanceEntityType
+    entity_key: str
+    change_type: ChangeType
+    before: Optional[Dict[str, Any]] = None
+    after: Optional[Dict[str, Any]] = None
+    reason: str = ""
+    changed_by: str = ""
+    changed_at: datetime
+
+
+class ChangeLogPageResponse(BaseModel):
+    items: List[ChangeLogResponse]
     total: int
     limit: int
     offset: int

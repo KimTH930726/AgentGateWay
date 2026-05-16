@@ -14,3 +14,6 @@ class IAgentRepository(ABC):
 
     @abstractmethod
     def save(self, agent: Agent) -> Agent: ...
+
+    @abstractmethod
+    def update(self, agent_id: str, updates: dict) -> Optional[Agent]: ...

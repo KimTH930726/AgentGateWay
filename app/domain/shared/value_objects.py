@@ -1,7 +1,7 @@
 import hashlib
 import json
-from dataclasses import dataclass
-from typing import Any, Dict
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 from app.domain.enums import ExecutionStatus
 
@@ -36,3 +36,47 @@ class ExecutionResult:
     output: Dict[str, Any]
     cost: float
     duration_ms: int = 0
+    tokens_used: int = 0
+
+
+@dataclass(frozen=True)
+class CandidateTool:
+    """One of multiple tools the agent considered before selecting this one.
+
+    `reason_not_selected` lets the agent record why an alternative lost out,
+    which is critical for governance review when behaviour later goes wrong.
+    """
+
+    tool_name: str
+    reason_not_selected: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"tool_name": self.tool_name, "reason_not_selected": self.reason_not_selected}
+
+
+@dataclass(frozen=True)
+class ToolSelection:
+    """Agent's reasoning about why it picked the tool it eventually invoked."""
+
+    selected_reason: str = ""
+    candidates: List[CandidateTool] = field(default_factory=list)
+
+    def candidates_as_dicts(self) -> List[Dict[str, Any]]:
+        return [c.to_dict() for c in self.candidates]
+
+    @classmethod
+    def from_storage(
+        cls,
+        selected_reason: Optional[str],
+        candidates: Optional[List[Dict[str, Any]]],
+    ) -> "ToolSelection":
+        return cls(
+            selected_reason=selected_reason or "",
+            candidates=[
+                CandidateTool(
+                    tool_name=c.get("tool_name", ""),
+                    reason_not_selected=c.get("reason_not_selected", ""),
+                )
+                for c in (candidates or [])
+            ],
+        )

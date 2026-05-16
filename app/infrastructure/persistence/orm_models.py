@@ -2,13 +2,21 @@ import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean, Column, DateTime, Enum as SAEnum, Float,
-    ForeignKey, Index, Integer, JSON, String, Text,
+    ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 from app.infrastructure.persistence.database import Base
-from app.domain.enums import ApprovalStatus, ExecutionStatus, PolicyDecision, RiskLevel
+from app.domain.enums import (
+    AgentToolPolicyType,
+    ApprovalStatus,
+    ChangeType,
+    ExecutionStatus,
+    GovernanceEntityType,
+    PolicyDecision,
+    RiskLevel,
+)
 
 
 def _now() -> datetime:
@@ -28,6 +36,7 @@ class ToolORM(Base):
     approval_required = Column(Boolean, nullable=False, default=False)
     sandbox_supported = Column(Boolean, nullable=False, default=False)
     daily_cost_limit = Column(Float, nullable=False, default=0.0)
+    warn_cost_threshold = Column(Float, nullable=True)
     enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
@@ -41,6 +50,10 @@ class AgentORM(Base):
     name = Column(String(128), nullable=False)
     allowed_domains = Column(JSON, nullable=False, default=list)
     enabled = Column(Boolean, nullable=False, default=True)
+    daily_cost_limit = Column(Float, nullable=True)
+    monthly_cost_limit = Column(Float, nullable=True)
+    daily_token_limit = Column(Integer, nullable=True)
+    daily_cost_warn_threshold = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
 
 
@@ -70,9 +83,13 @@ class ToolCallORM(Base):
     execution_status = Column(SAEnum(ExecutionStatus), nullable=True)
     estimated_cost = Column(Float, nullable=False, default=0.0)
     actual_cost = Column(Float, nullable=True)
+    tokens_used = Column(Integer, nullable=True)
     error_message = Column(Text, nullable=True)
     trace_id = Column(String(64), nullable=False, default="", index=True)
     policy_reason = Column(Text, nullable=False, default="")
+    rule_trace = Column(JSON, nullable=True)
+    selected_reason = Column(Text, nullable=True)
+    candidate_tools = Column(JSON, nullable=True)
     duration_ms = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
     executed_at = Column(DateTime(timezone=True), nullable=True)
@@ -83,6 +100,7 @@ class ToolCallORM(Base):
     __table_args__ = (
         # speeds up get_daily_cost aggregation query
         Index("ix_tool_calls_tool_name_created_at", "tool_name", "created_at"),
+        Index("ix_tool_calls_agent_id_created_at", "agent_id", "created_at"),
     )
 
 
@@ -98,3 +116,41 @@ class ApprovalORM(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
 
     tool_call = relationship("ToolCallORM", back_populates="approval")
+
+
+class AgentToolPolicyORM(Base):
+    """Per-agent allowlist / denylist entry. DENY rows always win over ALLOW rows."""
+    __tablename__ = "agent_tool_policies"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_id = Column(String(64), nullable=False, index=True)
+    tool_name = Column(String(128), nullable=False)
+    policy_type = Column(SAEnum(AgentToolPolicyType), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    reason = Column(Text, nullable=False, default="")
+    created_by = Column(String(64), nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id", "tool_name", "policy_type",
+            name="uq_agent_tool_policies_agent_tool_type",
+        ),
+        Index("ix_agent_tool_policies_agent_id_enabled", "agent_id", "enabled"),
+    )
+
+
+class ConfigChangeLogORM(Base):
+    """Append-only audit of every governance-relevant configuration change."""
+    __tablename__ = "config_change_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    entity_type = Column(SAEnum(GovernanceEntityType), nullable=False, index=True)
+    entity_key = Column(String(128), nullable=False, index=True)
+    change_type = Column(SAEnum(ChangeType), nullable=False)
+    before = Column(JSON, nullable=True)
+    after = Column(JSON, nullable=True)
+    reason = Column(Text, nullable=False, default="")
+    changed_by = Column(String(64), nullable=False, default="")
+    changed_at = Column(DateTime(timezone=True), nullable=False, default=_now, index=True)

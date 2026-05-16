@@ -6,7 +6,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.domain.enums import ApprovalStatus, ExecutionStatus, PolicyDecision, RiskLevel
-from app.domain.shared.value_objects import InputData
+from app.domain.policy.trace import trace_from_dicts, trace_to_dicts
+from app.domain.shared.value_objects import InputData, ToolSelection
 from app.domain.tool_call.repository import IToolCallRepository
 from app.domain.tool_call.tool_call import Approval, ToolCall
 from app.infrastructure.persistence.orm_models import ApprovalORM, ToolCallORM
@@ -50,6 +51,12 @@ class ToolCallRepository(IToolCallRepository):
             actual_cost=row.actual_cost,
             error_message=row.error_message,
             executed_at=row.executed_at,
+            tool_selection=ToolSelection.from_storage(
+                selected_reason=row.selected_reason,
+                candidates=row.candidate_tools,
+            ),
+            rule_trace=trace_from_dicts(row.rule_trace or []),
+            tokens_used=row.tokens_used,
         )
 
     # --- IToolCallRepository -----------------------------------------------
@@ -76,9 +83,17 @@ class ToolCallRepository(IToolCallRepository):
                 execution_status=tool_call.execution_status,
                 estimated_cost=tool_call.estimated_cost,
                 actual_cost=tool_call.actual_cost,
+                tokens_used=tool_call.tokens_used,
                 error_message=tool_call.error_message,
                 trace_id=tool_call.trace_id,
                 policy_reason=tool_call.policy_reason,
+                rule_trace=trace_to_dicts(tool_call.rule_trace),
+                selected_reason=tool_call.tool_selection.selected_reason or None,
+                candidate_tools=(
+                    tool_call.tool_selection.candidates_as_dicts()
+                    if tool_call.tool_selection.candidates
+                    else None
+                ),
                 duration_ms=tool_call.duration_ms,
                 created_at=tool_call.created_at,
                 executed_at=tool_call.executed_at,
@@ -89,6 +104,7 @@ class ToolCallRepository(IToolCallRepository):
             tc_row.approval_status = tool_call.approval.status if tool_call.approval else None
             tc_row.execution_status = tool_call.execution_status
             tc_row.actual_cost = tool_call.actual_cost
+            tc_row.tokens_used = tool_call.tokens_used
             tc_row.error_message = tool_call.error_message
             tc_row.duration_ms = tool_call.duration_ms
             tc_row.executed_at = tool_call.executed_at
@@ -156,7 +172,7 @@ class ToolCallRepository(IToolCallRepository):
         return [self._to_domain(r) for r in q.order_by(ToolCallORM.created_at.desc()).all()]
 
     def get_daily_cost(self, tool_name: str) -> float:
-        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        today = self._today_start()
         result = (
             self._db.query(func.coalesce(func.sum(ToolCallORM.actual_cost), 0.0))
             .filter(ToolCallORM.tool_name == tool_name, ToolCallORM.created_at >= today)
@@ -164,5 +180,42 @@ class ToolCallRepository(IToolCallRepository):
         )
         return float(result)
 
+    def get_agent_daily_cost(self, agent_id: str) -> float:
+        today = self._today_start()
+        result = (
+            self._db.query(func.coalesce(func.sum(ToolCallORM.actual_cost), 0.0))
+            .filter(ToolCallORM.agent_id == agent_id, ToolCallORM.created_at >= today)
+            .scalar()
+        )
+        return float(result)
+
+    def get_agent_daily_tokens(self, agent_id: str) -> int:
+        today = self._today_start()
+        result = (
+            self._db.query(func.coalesce(func.sum(ToolCallORM.tokens_used), 0))
+            .filter(ToolCallORM.agent_id == agent_id, ToolCallORM.created_at >= today)
+            .scalar()
+        )
+        return int(result or 0)
+
+    def get_agent_monthly_cost(self, agent_id: str) -> float:
+        month_start = (
+            datetime.now(timezone.utc)
+            .replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        )
+        result = (
+            self._db.query(func.coalesce(func.sum(ToolCallORM.actual_cost), 0.0))
+            .filter(
+                ToolCallORM.agent_id == agent_id,
+                ToolCallORM.created_at >= month_start,
+            )
+            .scalar()
+        )
+        return float(result)
+
     def count_all(self) -> int:
         return self._db.query(func.count(ToolCallORM.id)).scalar() or 0
+
+    @staticmethod
+    def _today_start() -> datetime:
+        return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)

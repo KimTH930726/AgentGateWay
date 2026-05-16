@@ -38,13 +38,31 @@ AgentGate는 에이전트와 도구 사이에 위치하는 **Control Plane**입�
 
 | 기능 | 상세 |
 |------|------|
-| **Tool Registry** | 도구 등록, 위험도(LOW/MEDIUM/HIGH), 역할 요구사항, 일일 비용 한도, 활성화 토글 |
-| **Policy Engine** | Chain of Responsibility — 7개 룰 순서 평가, 첫 매칭 단락. 새 룰 추가 시 기존 코드 무변경 |
+| **Tool Registry** | 도구 등록, 위험도(LOW/MEDIUM/HIGH), 역할 요구사항, 일일 비용 한도(`daily_cost_limit`) + 소프트 한도(`warn_cost_threshold`), 활성화 토글 |
+| **Policy Engine** | Chain of Responsibility — 12개 룰 순서 평가, 첫 매칭 단락. 새 룰 추가 시 기존 코드 무변경. 평가 trace를 호출별로 보관 |
+| **Agent Tool Policy** | Agent별 Allowlist/Denylist (DENY > ALLOW 우선). 사유·작성자·활성여부 기록, 변경 시 자동 감사 |
+| **Agent Budget** | Agent별 일일 비용/토큰 한도. 초과 → DENY, 워닝 임계치 도달 → REQUIRE_APPROVAL |
+| **Decision Tracking** | Invoke 요청에 `selected_reason`과 `candidates`(미선택 후보의 사유) 첨부, ToolCall과 함께 영구 저장 |
 | **Approval Flow** | HIGH 위험 / approval_required 도구는 관리자 승인 후 실행. PENDING → APPROVED → EXECUTED 상태 추적 |
-| **Audit Log** | 모든 호출에 trace_id, policy_reason, duration_ms 기록. 페이지네이션 제공 |
+| **Audit Log** | 모든 호출에 trace_id, policy_reason, rule_trace, duration_ms, tokens_used 기록. 페이지네이션 제공 |
+| **Config Change Log** | Tool / AgentToolPolicy 변경마다 before·after JSON + actor·reason 기록 (`/governance/change-logs`) |
 | **Domain Events** | 상태 전환마다 이벤트 발행 (ToolCallCreated, Approved, Executed…). 이벤트 버스 연결 확장점 |
 | **표준 에러 응답** | `{"code": "NOT_FOUND", "message": "..."}` — 전역 핸들러 한 곳에서 관리 |
 | **MockExecutor** | 실제 HTTP 없이 도구 실행 시뮬레이션. IToolExecutor 인터페이스로 실 구현체 교체 가능 |
+
+---
+
+## Governance 확장 API
+
+| 메서드 | 경로 | 설명 |
+|-------|------|------|
+| POST/GET/PATCH/DELETE | `/api/v1/agent-tool-policies` | Agent별 Allow/Deny 엔트리 CRUD. DENY가 ALLOW를 항상 우선합니다 |
+| GET | `/api/v1/agents/{agent_id}/usage` | 해당 Agent의 오늘/이번 달 비용·토큰 사용량과 한도 비교 |
+| PATCH | `/api/v1/agents/{agent_id}` | Agent의 budget 필드(`daily_cost_limit` 등) 갱신 |
+| GET | `/api/v1/governance/change-logs` | Tool / AgentToolPolicy 변경 이력 페이지네이션 조회 (`entity_type`, `entity_key` 필터 지원) |
+| POST | `/api/v1/gateway/invoke` | `selected_reason`, `candidates[{tool_name, reason_not_selected}]` 옵션 필드 추가 |
+
+`X-Acting-User`, `X-Change-Reason` 헤더를 같이 보내면 Tool / Policy 변경 시 감사 로그의 `changed_by` / `reason` 필드를 채울 수 있습니다.
 
 ---
 

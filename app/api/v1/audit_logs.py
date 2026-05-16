@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import get_tool_call_repo
-from app.api.schemas import AuditLogPage, AuditLogResponse
+from app.api.schemas import (
+    AuditLogPage,
+    AuditLogResponse,
+    CandidateToolPayload,
+    RuleEvaluationResponse,
+)
 from app.domain.shared.exceptions import NotFoundError
 from app.domain.tool_call.tool_call import ToolCall
 from app.infrastructure.persistence.repositories.tool_call_repository import ToolCallRepository
@@ -10,6 +15,7 @@ router = APIRouter(prefix="/audit-logs", tags=["Audit Logs"])
 
 
 def _to_response(tc: ToolCall) -> AuditLogResponse:
+    candidates = tc.tool_selection.candidates
     return AuditLogResponse(
         request_id=tc.request_id,
         trace_id=tc.trace_id,
@@ -24,9 +30,27 @@ def _to_response(tc: ToolCall) -> AuditLogResponse:
         execution_status=tc.execution_status,
         estimated_cost=tc.estimated_cost,
         actual_cost=tc.actual_cost,
+        tokens_used=tc.tokens_used,
         duration_ms=tc.duration_ms,
         created_at=tc.created_at,
         executed_at=tc.executed_at,
+        selected_reason=tc.tool_selection.selected_reason or None,
+        candidates=(
+            [
+                CandidateToolPayload(
+                    tool_name=c.tool_name, reason_not_selected=c.reason_not_selected
+                )
+                for c in candidates
+            ]
+            if candidates
+            else None
+        ),
+        rule_trace=[
+            RuleEvaluationResponse(
+                rule=e.rule_name, outcome=e.outcome, reason=e.reason
+            )
+            for e in tc.rule_trace
+        ],
     )
 
 

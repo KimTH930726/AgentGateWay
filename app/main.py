@@ -3,7 +3,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.schemas import ErrorCode, ErrorResponse
-from app.api.v1 import agents, approvals, audit_logs, gateway, tools, users
+from app.api.v1 import (
+    agent_tool_policies,
+    agents,
+    approvals,
+    audit_logs,
+    gateway,
+    governance,
+    tools,
+    users,
+)
 from app.domain.shared.exceptions import ConflictError, DomainError, NotFoundError
 
 app = FastAPI(
@@ -59,6 +68,8 @@ app.include_router(users.router, prefix=_V1)
 app.include_router(gateway.router, prefix=_V1)
 app.include_router(approvals.router, prefix=_V1)
 app.include_router(audit_logs.router, prefix=_V1)
+app.include_router(agent_tool_policies.router, prefix=_V1)
+app.include_router(governance.router, prefix=_V1)
 
 
 @app.get("/health", tags=["Health"])

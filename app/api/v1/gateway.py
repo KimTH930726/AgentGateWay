@@ -1,8 +1,18 @@
 from fastapi import APIRouter, Depends, Request
 
 from app.api.deps import get_execute_approved, get_invoke_tool
-from app.api.schemas import InvokeRequest, InvokeResponse
-from app.application.gateway.use_cases import ExecuteApprovedUseCase, InvokeToolCommand, InvokeToolUseCase
+from app.api.schemas import (
+    CandidateToolPayload,
+    InvokeRequest,
+    InvokeResponse,
+    RuleEvaluationResponse,
+)
+from app.application.gateway.use_cases import (
+    CandidateToolDTO,
+    ExecuteApprovedUseCase,
+    InvokeToolCommand,
+    InvokeToolUseCase,
+)
 from app.domain.tool_call.tool_call import ToolCall
 
 router = APIRouter(prefix="/gateway", tags=["Gateway"])
@@ -11,6 +21,7 @@ _TRACE_HEADER = "X-Trace-Id"
 
 
 def _to_response(tc: ToolCall) -> InvokeResponse:
+    candidates = tc.tool_selection.candidates
     return InvokeResponse(
         request_id=tc.request_id,
         tool_name=tc.tool_name,
@@ -22,10 +33,30 @@ def _to_response(tc: ToolCall) -> InvokeResponse:
         risk_level=tc.risk_level,
         estimated_cost=tc.estimated_cost,
         actual_cost=tc.actual_cost,
+        tokens_used=tc.tokens_used,
         duration_ms=tc.duration_ms,
         error_message=tc.error_message,
         created_at=tc.created_at,
         executed_at=tc.executed_at,
+        selected_reason=tc.tool_selection.selected_reason or None,
+        candidates=(
+            [
+                CandidateToolPayload(
+                    tool_name=c.tool_name, reason_not_selected=c.reason_not_selected
+                )
+                for c in candidates
+            ]
+            if candidates
+            else None
+        ),
+        rule_trace=[
+            RuleEvaluationResponse(
+                rule=evaluation.rule_name,
+                outcome=evaluation.outcome,
+                reason=evaluation.reason,
+            )
+            for evaluation in tc.rule_trace
+        ],
     )
 
 
@@ -42,6 +73,11 @@ def invoke_tool(
         tool_name=body.tool_name,
         input_data=body.input,
         trace_id=trace_id,
+        selected_reason=body.selected_reason or "",
+        candidates=[
+            CandidateToolDTO(tool_name=c.tool_name, reason_not_selected=c.reason_not_selected)
+            for c in (body.candidates or [])
+        ],
     ))
     return _to_response(result)
 

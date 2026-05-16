@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from app.domain.enums import ApprovalStatus, ExecutionStatus, PolicyDecision, RiskLevel
+from app.domain.policy.trace import RuleEvaluation
 from app.domain.shared.exceptions import DomainError
-from app.domain.shared.value_objects import ExecutionResult, InputData
+from app.domain.shared.value_objects import ExecutionResult, InputData, ToolSelection
 from app.domain.tool_call.events import (
     ApprovalRequestedEvent,
     DomainEvent,
@@ -65,6 +66,9 @@ class ToolCall:
         actual_cost: Optional[float] = None,
         error_message: Optional[str] = None,
         executed_at: Optional[datetime] = None,
+        tool_selection: Optional[ToolSelection] = None,
+        rule_trace: Optional[List[RuleEvaluation]] = None,
+        tokens_used: Optional[int] = None,
     ) -> None:
         self._request_id = request_id
         self._agent_id = agent_id
@@ -83,6 +87,9 @@ class ToolCall:
         self._actual_cost = actual_cost
         self._error_message = error_message
         self._executed_at = executed_at
+        self._tool_selection = tool_selection or ToolSelection()
+        self._rule_trace: List[RuleEvaluation] = list(rule_trace or [])
+        self._tokens_used = tokens_used
         self._events: List[DomainEvent] = []
 
     # --- Factory -----------------------------------------------------------
@@ -99,6 +106,8 @@ class ToolCall:
         estimated_cost: float = 0.01,
         trace_id: str = "",
         policy_reason: str = "",
+        tool_selection: Optional[ToolSelection] = None,
+        rule_trace: Optional[List[RuleEvaluation]] = None,
     ) -> "ToolCall":
         now = _now()
         tc = cls(
@@ -113,6 +122,8 @@ class ToolCall:
             created_at=now,
             trace_id=trace_id,
             policy_reason=policy_reason,
+            tool_selection=tool_selection,
+            rule_trace=rule_trace,
         )
         tc._events.append(
             ToolCallCreatedEvent(
@@ -189,6 +200,7 @@ class ToolCall:
         self._execution_status = result.status
         self._actual_cost = result.cost
         self._duration_ms = result.duration_ms
+        self._tokens_used = result.tokens_used
         self._executed_at = _now()
 
         if self._approval is not None:
@@ -294,3 +306,15 @@ class ToolCall:
     @property
     def duration_ms(self) -> Optional[int]:
         return self._duration_ms
+
+    @property
+    def tool_selection(self) -> ToolSelection:
+        return self._tool_selection
+
+    @property
+    def rule_trace(self) -> List[RuleEvaluation]:
+        return list(self._rule_trace)
+
+    @property
+    def tokens_used(self) -> Optional[int]:
+        return self._tokens_used
