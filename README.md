@@ -541,40 +541,60 @@ pytest --cov=app --cov-report=term-missing      # 커버리지 포함
 ## ERD
 
 ```
-tools                      agents                    users
-─────────────────────      ──────────────────────    ────────────────
-tool_id (UK, INDEX)        agent_id (UK, INDEX)      user_id (UK, INDEX)
-name                       name                      roles (JSON)
-description                allowed_domains (JSON)    enabled
-domain                     enabled
-risk_level                 created_at
-required_role
-approval_required
-sandbox_supported
-daily_cost_limit
+tools                              agents                          users
+─────────────────────              ───────────────────────────     ────────────────
+tool_id (UK, INDEX)                agent_id (UK, INDEX)            user_id (UK, INDEX)
+name                               name                            roles (JSON)
+description                        allowed_domains (JSON)          enabled
+domain                             enabled                         created_at
+risk_level                         daily_cost_limit
+required_role                      monthly_cost_limit
+approval_required                  daily_token_limit
+sandbox_supported                  daily_cost_warn_threshold
+daily_cost_limit                   created_at
+warn_cost_threshold
 enabled
 created_at · updated_at
 
 tool_calls (핵심 감사 테이블)
 ─────────────────────────────────────────────────────────────────────────
 request_id (UK, INDEX)     trace_id (INDEX)           policy_reason
-agent_id (INDEX)           duration_ms
-user_id (INDEX)            risk_level
-tool_name ──┐              policy_decision    ALLOW | REQUIRE_APPROVAL | DENY
+agent_id (INDEX) ──┐       duration_ms                rule_trace (JSON)
+user_id (INDEX)    │       risk_level                 selected_reason
+tool_name ──┐      │       policy_decision    ALLOW | REQUIRE_APPROVAL | DENY
 input_data  │ (INDEX)      approval_status    PENDING|APPROVED|REJECTED|EXECUTED|FAILED
-input_hash  ┘              execution_status   SIMULATED|SUCCESS|FAILED|SKIPPED
-estimated_cost             actual_cost
-created_at (INDEX) ────────────────────────── tool_name + created_at (복합 인덱스)
+input_hash  ┘      │       execution_status   SIMULATED|SUCCESS|FAILED|SKIPPED
+estimated_cost     │       actual_cost · tokens_used
+candidate_tools (JSON)
+created_at (INDEX) ──┴── 복합 인덱스 (tool_name+created_at) · (agent_id+created_at)
 executed_at
 
 approvals
 ─────────────────────────────────────
 id (PK)
 tool_call_id → tool_calls.id (INDEX)
-approver_id
-status
-reason
+approver_id · status · reason
 created_at · updated_at
+
+agent_tool_policies (Allow/Deny per agent)
+─────────────────────────────────────────────────────────────────────────
+id (PK)
+agent_id (INDEX)
+tool_name
+policy_type        ALLOW | DENY               ── UNIQUE (agent_id, tool_name, policy_type)
+enabled            INDEX (agent_id, enabled)
+reason · created_by
+created_at · updated_at
+
+config_change_logs (append-only governance journal)
+─────────────────────────────────────────────────────────────────────────
+id (PK)
+entity_type   TOOL | AGENT | USER | AGENT_TOOL_POLICY    (INDEX)
+entity_key                                                (INDEX)
+change_type   CREATE | UPDATE | DELETE
+before (JSON) · after (JSON)
+reason · changed_by
+changed_at    (INDEX)
 ```
 
 ---

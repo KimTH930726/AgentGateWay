@@ -5,6 +5,8 @@
 AgentGate는 AI Agent의 모든 도구 호출을 인터셉트해
 **정책 평가 → 실행/승인/차단 → 감사 기록** 파이프라인을 강제하는 백엔드 게이트웨이입니다.
 
+Governance 확장 후에는 단순 Tool 실행 제어를 넘어 **Agent 단위 정책, 비용·토큰 예산, 도구 선택 추적, 정책 평가 trace, 설정 변경 이력**까지 동일한 도메인 경계 안에서 다룹니다 — "AI Agent Tool Governance Platform".
+
 **설계 원칙**
 - **DDD (Domain-Driven Design)**: 비즈니스 불변식을 Aggregate 경계 안에 캡슐화
 - **Hexagonal Architecture (Ports & Adapters)**: 도메인은 인터페이스(ABC)만 알고, 구현체는 주입
@@ -17,7 +19,7 @@ AgentGate는 AI Agent의 모든 도구 호출을 인터셉트해
 ```mermaid
 graph TB
     subgraph api ["api/ — HTTP 경계"]
-        R["FastAPI Routers\ntools · gateway · approvals · audit_logs"]
+        R["FastAPI Routers\ntools · gateway · approvals · audit_logs\nagent_tool_policies · governance · agents · users"]
         S["Pydantic Schemas\n(request / response 변환)"]
         DP["deps.py\n(의존성 배선)"]
     end
@@ -25,21 +27,22 @@ graph TB
     subgraph application ["application/ — Use-case 레이어"]
         UC1["InvokeToolUseCase\nExecuteApprovedUseCase"]
         UC2["ApproveToolCallUseCase\nRejectToolCallUseCase"]
-        UC3["RegisterToolUseCase\nListToolsUseCase ..."]
+        UC3["RegisterToolUseCase ...\nCreateAgentToolPolicyUseCase ...\nListChangeLogsUseCase"]
     end
 
     subgraph domain ["domain/ — 핵심 비즈니스 로직 (I/O 없음)"]
         AGG["ToolCall Aggregate Root\n+ Approval Entity\n+ Domain Events"]
-        PE["PolicyEngine\n(Domain Service)"]
-        RULES["PolicyRule Chain\n7개 구체 룰"]
-        PORTS["Ports (ABC)\nIToolRepository\nIToolCallRepository\nIToolExecutor ..."]
-        VO["Value Objects\nInputData · ExecutionResult"]
+        AGG2["AgentToolPolicy Aggregate\nConfigChangeLog Aggregate"]
+        PE["PolicyEngine\n(Domain Service)\n+ RuleEvaluation trace"]
+        RULES["PolicyRule Chain\n12개 구체 룰"]
+        PORTS["Ports (ABC)\nIToolRepository · IToolCallRepository\nIAgentToolPolicyRepository\nIConfigChangeLogRepository · IToolExecutor"]
+        VO["Value Objects\nInputData · ExecutionResult\nToolSelection · CandidateTool"]
     end
 
     subgraph infra ["infrastructure/ — Adapters"]
-        REPO["SQLAlchemy Repositories\nToolCallRepository\nToolRepository ..."]
+        REPO["SQLAlchemy Repositories\nToolCallRepository · ToolRepository\nAgentToolPolicyRepository\nConfigChangeLogRepository ..."]
         EXEC["MockExecutor\n(IToolExecutor 구현)"]
-        ORM["ORM Models\ntool_calls · approvals · tools ..."]
+        ORM["ORM Models\ntool_calls · approvals · tools\nagents · agent_tool_policies\nconfig_change_logs"]
     end
 
     api --> application
@@ -219,31 +222,61 @@ stateDiagram-v2
 
 ## Policy Engine — Rule Chain 상세
 
+12개 룰을 순서대로 평가하며, 첫 번째로 단락하는 룰이 결정을 확정합니다. 각 룰의 평가 결과(PASS / DENY / REQUIRE_APPROVAL + 사유)는 `RuleEvaluation`으로 수집되어 ToolCall에 `rule_trace` JSON으로 영구 저장됩니다.
+
 ```mermaid
 flowchart TD
-    CTX(["PolicyContext\n(Tool · Agent · User · daily_cost)"]) --> R1
+    CTX(["PolicyContext\nTool · Agent · User\ndaily_usage_cost · agent_daily_cost\nagent_daily_tokens · agent_tool_policies"]) --> R1
 
-    R1{"ToolEnabledRule\ntool.enabled?"} -->|False| D1(["DENY\n'Tool is disabled'"])
-    R1 -->|True| R2
+    R1{"ToolEnabledRule"} -->|disabled| D1(["DENY"])
+    R1 -->|enabled| R2
 
-    R2{"UserEnabledRule\nuser.enabled?"} -->|False| D2(["DENY\n'User account is disabled'"])
-    R2 -->|True| R3
+    R2{"UserEnabledRule"} -->|disabled| D2(["DENY"])
+    R2 -->|enabled| R3
 
-    R3{"AgentEnabledRule\nagent.enabled?"} -->|False| D3(["DENY\n'Agent is disabled'"])
-    R3 -->|True| R4
+    R3{"AgentEnabledRule"} -->|disabled| D3(["DENY"])
+    R3 -->|enabled| R4
 
-    R4{"RoleCheckRule\nuser.has_role(required_role)?"} -->|False| D4(["DENY\n'User lacks required role: {role}'"])
-    R4 -->|True| R5
+    R4{"AgentToolPolicyRule\nallowlist/denylist 평가"} -->|DENY 매칭| D4(["DENY\n'denylist'"])
+    R4 -->|ALLOWLIST 누락| D4b(["DENY\n'not on allowlist'"])
+    R4 -->|no opinion / allowed| R5
 
-    R5{"DomainAccessRule\nagent.can_access_domain(domain)?"} -->|False| D5(["DENY\n'Agent not permitted to access domain: {domain}'"])
-    R5 -->|True| R6
+    R5{"RoleCheckRule"} -->|미보유| D5(["DENY"])
+    R5 -->|보유| R6
 
-    R6{"CostLimitRule\ndaily_cost >= daily_cost_limit?"} -->|True| D6(["DENY\n'Daily cost limit exceeded: {limit}'"])
-    R6 -->|False| R7
+    R6{"DomainAccessRule"} -->|불허| D6(["DENY"])
+    R6 -->|허용| R7
 
-    R7{"ApprovalRequiredRule\ntool.requires_approval()?"} -->|True| RA(["REQUIRE_APPROVAL\n'Tool risk level {level} requires human approval'"])
-    R7 -->|False| AL(["ALLOW\n'All policy checks passed'"])
+    R7{"CostLimitRule\ntool 하드 한도"} -->|초과| D7(["DENY"])
+    R7 -->|미달| R8
+
+    R8{"ToolCostWarnRule\ntool 워닝 임계"} -->|구간 진입| RA1(["REQUIRE_APPROVAL"])
+    R8 -->|미달| R9
+
+    R9{"AgentBudgetHardRule\nagent 하드 한도"} -->|초과| D9(["DENY"])
+    R9 -->|미달| R10
+
+    R10{"AgentTokenLimitRule"} -->|초과| D10(["DENY"])
+    R10 -->|미달| R11
+
+    R11{"AgentBudgetWarnRule\nagent 워닝 임계"} -->|구간 진입| RA2(["REQUIRE_APPROVAL"])
+    R11 -->|미달| R12
+
+    R12{"ApprovalRequiredRule\ntool.requires_approval()"} -->|True| RA3(["REQUIRE_APPROVAL"])
+    R12 -->|False| AL(["ALLOW"])
 ```
+
+**룰 분류**
+
+| 분류 | 룰 | 결정 |
+|------|----|------|
+| Entity 활성화 | ToolEnabledRule · UserEnabledRule · AgentEnabledRule | DENY |
+| Agent 권한 | AgentToolPolicyRule (Allow/Deny) · RoleCheckRule · DomainAccessRule | DENY |
+| Tool 비용 | CostLimitRule (하드) | DENY |
+| Tool 비용 | ToolCostWarnRule (소프트) | REQUIRE_APPROVAL |
+| Agent 예산 | AgentBudgetHardRule · AgentTokenLimitRule | DENY |
+| Agent 예산 | AgentBudgetWarnRule | REQUIRE_APPROVAL |
+| Risk 기반 | ApprovalRequiredRule | REQUIRE_APPROVAL |
 
 **확장 방법**:
 ```python
@@ -424,65 +457,90 @@ approval = relationship(
 app/
 ├── domain/
 │   ├── enums.py                    RiskLevel · PolicyDecision · ApprovalStatus · ExecutionStatus
+│   │                               AgentToolPolicyType · GovernanceEntityType · ChangeType · RuleOutcome
 │   ├── shared/
 │   │   ├── exceptions.py           AgentGateError 계층 (code 속성)
-│   │   └── value_objects.py        InputData(SHA-256 해시) · ExecutionResult(duration_ms)
+│   │   └── value_objects.py        InputData · ExecutionResult(duration_ms, tokens_used)
+│   │                               ToolSelection · CandidateTool
 │   ├── tool/
-│   │   ├── tool.py                 Tool 애그리게이트 (requires_approval())
+│   │   ├── tool.py                 Tool 애그리게이트 (requires_approval() · warn_cost_threshold)
 │   │   └── repository.py           IToolRepository (ABC)
 │   ├── agent/
-│   │   ├── agent.py                Agent 애그리게이트 (can_access_domain())
-│   │   └── repository.py           IAgentRepository (ABC)
+│   │   ├── agent.py                Agent 애그리게이트 + 예산 필드 (daily/monthly cost, token, warn)
+│   │   └── repository.py           IAgentRepository (ABC, update 포함)
 │   ├── user/
 │   │   ├── user.py                 User 애그리게이트 (has_role())
 │   │   └── repository.py           IUserRepository (ABC)
 │   ├── tool_call/
 │   │   ├── tool_call.py            ToolCall Aggregate Root + Approval Entity
+│   │   │                           + tool_selection · rule_trace · tokens_used
 │   │   ├── events.py               도메인 이벤트 6종 (frozen dataclass)
-│   │   ├── repository.py           IToolCallRepository (ABC)
+│   │   ├── repository.py           IToolCallRepository (ABC, agent 단위 집계 포함)
 │   │   └── executor.py             IToolExecutor (ABC)
-│   └── policy/
-│       ├── context.py              PolicyContext · PolicyResult
-│       ├── rules.py                PolicyRule(ABC) + 7 concrete rules + DEFAULT_RULES
-│       └── policy_engine.py        PolicyEngine — rule chain 순회
+│   ├── policy/
+│   │   ├── context.py              PolicyContext (agent 예산·정책 포함) · PolicyResult
+│   │   ├── rules.py                PolicyRule(ABC) + 12 concrete rules + DEFAULT_RULES
+│   │   ├── policy_engine.py        PolicyEngine — rule chain + trace 수집
+│   │   └── trace.py                RuleEvaluation 값 객체 + JSON 직렬화 헬퍼
+│   ├── agent_tool_policy/
+│   │   ├── agent_tool_policy.py    AgentToolPolicy aggregate
+│   │   │                           + evaluate_agent_tool_policies (DENY > ALLOW)
+│   │   └── repository.py           IAgentToolPolicyRepository (ABC)
+│   └── governance/
+│       ├── change_log.py           ConfigChangeLog aggregate (append-only)
+│       └── repository.py           IConfigChangeLogRepository (ABC)
 │
 ├── application/
-│   ├── tool/use_cases.py           Register · Get · List · Update · Delete
+│   ├── tool/use_cases.py           Register · Get · List · Update · Delete + change-log 발생
 │   ├── gateway/use_cases.py        InvokeToolUseCase · ExecuteApprovedUseCase
-│   └── approval/use_cases.py       List · Get · Approve · Reject
+│   │                               + selected_reason · candidates · agent 예산 컨텍스트
+│   ├── approval/use_cases.py       List · Get · Approve · Reject
+│   ├── agent_tool_policy/
+│   │   └── use_cases.py            Create · List · Get · Update · Delete + change-log 발생
+│   └── governance/
+│       └── use_cases.py            ListChangeLogsUseCase (페이지네이션)
 │
 ├── infrastructure/
 │   ├── persistence/
 │   │   ├── database.py             SQLAlchemy 엔진 (SQLite/PostgreSQL 이중 호환)
-│   │   ├── orm_models.py           ORM 정의 (trace_id · policy_reason · duration_ms)
-│   │   └── repositories/           구체 리포지토리 구현체
+│   │   ├── orm_models.py           ORM 정의 (governance 컬럼 + 신규 테이블)
+│   │   └── repositories/           구체 리포지토리 (agent_tool_policy · change_log 포함)
 │   └── execution/
 │       └── mock_executor.py        MockExecutor (wall-clock timing 포함)
 │
 └── api/
     ├── deps.py                     FastAPI 의존성 배선
-    ├── schemas.py                  Pydantic (ErrorCode · ErrorResponse · AuditLogPage)
+    ├── schemas.py                  Pydantic 스키마 (governance DTO 포함)
     └── v1/
-        ├── gateway.py              /invoke · /execute — try/except 없음
-        ├── tools.py                /tools CRUD — try/except 없음
-        ├── approvals.py            /approvals — try/except 없음
-        ├── audit_logs.py           /audit-logs 페이지네이션 — try/except 없음
-        ├── agents.py
-        └── users.py
+        ├── gateway.py              /invoke · /execute — selection · rule_trace 노출
+        ├── tools.py                /tools CRUD — X-Acting-User · X-Change-Reason 헤더
+        ├── approvals.py            /approvals
+        ├── audit_logs.py           /audit-logs 페이지네이션 + 신규 필드 노출
+        ├── agents.py               /agents CRUD + /agents/{id}/usage
+        ├── users.py
+        ├── agent_tool_policies.py  /agent-tool-policies CRUD
+        └── governance.py           /governance/change-logs 페이지네이션 조회
 
 alembic/versions/
 ├── 0001_initial_schema.py
 ├── 0002_add_performance_indices.py  복합 인덱스 (tool_name+created_at) · approval FK
-└── 0003_audit_enrichment.py         trace_id(INDEX) · policy_reason · duration_ms
+├── 0003_audit_enrichment.py         trace_id(INDEX) · policy_reason · duration_ms
+└── 0004_governance_expansion.py     warn_cost_threshold · agent 예산 · tokens_used
+                                     rule_trace · selected_reason · candidate_tools
+                                     agent_tool_policies · config_change_logs
 
-tests/                               112 tests, 0 failures
+tests/                               154 tests, 0 failures (coverage 95%)
 ├── test_tool_call_aggregate.py      18 — 상태 머신 전환 경로
 ├── test_value_objects.py            12 — 해싱 · 불변성
-├── test_policy.py                   9  — PolicyEngine 전체 흐름
+├── test_policy.py                    9 — PolicyEngine 전체 흐름
 ├── test_policy_rules.py             22 — 룰 격리 + 커스텀 체인
-├── test_domain_events.py            8  — 이벤트 발행 순서/내용
+├── test_domain_events.py             8 — 이벤트 발행 순서/내용
 ├── test_audit_enrichment.py         21 — trace_id · pagination · 에러 포맷
 ├── test_gateway.py                  10 — HTTP 통합 테스트
-├── test_approvals.py                6  — 승인 플로우
-└── test_tools.py                    7  — Tool Registry
+├── test_approvals.py                 6 — 승인 플로우
+├── test_tools.py                     7 — Tool Registry
+├── test_agent_tool_policy.py        15 — DENY > ALLOW + CRUD + e2e
+├── test_agent_budget.py             13 — 룰 격리 + warn band + /usage
+├── test_decision_tracking.py         6 — selected_reason · candidates · rule_trace
+└── test_change_log.py                8 — Tool / Policy 변경 감사
 ```
